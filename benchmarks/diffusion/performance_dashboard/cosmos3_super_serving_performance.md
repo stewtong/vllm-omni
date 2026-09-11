@@ -357,6 +357,8 @@ Measurement logs, sweep JSONs, parity logs, sha256 manifests, and clips are reta
 
 ---
 
+# 10. DLO on B200 with v0.28.0
+
 On B200, the pinned v0.26.0 DLO DP2 configuration returns `Cosmos3OmniDiffusersPipeline does not support request-batch forward.` The v0.26.0 rank-local SP4 configuration records `DiffusionWorker-2(exitcode=None)` and fails the request. SP4 with `--enforce-eager` completes at about 185 seconds per warm wave. On pinned v0.28.0, DP2 and SP4 each complete one cold and three warm waves: DP2 has 2 cold plus 6 warm outputs; SP4 has 1 cold plus 3 warm outputs. This establishes a release-level comparison; Torch, diffusers, Triton and other dependencies changed along with vLLM-Omni.
 
 Measured September 10, 2026 on 8x B200 SXM (183,359 MiB reported per GPU), driver 580.173.02. This section uses different images from sections 1-9 and compares the v0.28.0 configurations only with one another.
@@ -373,7 +375,7 @@ Image pins:
 * v0.26.0: `vllm/vllm-omni@sha256:5cba1538c6f8ee81e8bea6708c24e68d7b2640f466a9fbf2ef15e68f2168b48b`
 * v0.28.0: `vllm/vllm-omni@sha256:6f8be103eaf0055448cf7578cfd621405fd669079d4361bd58896326b2bf722a` (amd64 manifest `sha256:4780186f168af96634917208596675439fa71cb5ed3440a30e8c21ca1defc451`)
 
-Cosmos3-Super, BF16, model snapshot `e0262be9d8f7586bc24c069a2aed2b665bdff266`; 1280x720, 189 frames, 24 fps, 35 steps, guidance 6.0, flow shift 10.0, seed 17, guardrails off. Direct `/v1/videos/sync` requests. Each measured configuration has one cold wave and three complete valid warm waves on its counted server launch. Wave span is the last response-body completion minus the first client submission. The retained wave boundaries use UTC timestamps; per-request durations use a monotonic clock. Videos/h/GPU is `3600 * valid warm outputs / (sum of warm spans * assigned GPUs)`. Three repeats support no percentile claims.
+Cosmos3-Super, BF16, model snapshot `e0262be9d8f7586bc24c069a2aed2b665bdff266`; 1280x720, 189 frames, 24 fps, 35 steps, guidance 6.0, flow shift 10.0, seed 17, guardrails off. Direct `/v1/videos/sync` requests. Each measured configuration has one cold wave and three valid warm waves from the same server launch. Wave span is the last response-body completion minus the first client submission. The retained wave boundaries use UTC timestamps; per-request durations use a monotonic clock. Videos/h/GPU is `3600 * valid warm outputs / (sum of warm spans * assigned GPUs)`. Three repeats support no percentile claims.
 
 ## 10.1 Warm latency, throughput and memory
 
@@ -394,13 +396,13 @@ Cosmos3-Super, BF16, model snapshot `e0262be9d8f7586bc24c069a2aed2b665bdff266`; 
 
 The measured latency/throughput frontier contains resident CFG2 x Ulysses4 x HSDP8, resident TP4 and resident single GPU. Every tested DLO point is dominated on those two measured axes. This does not establish a frontier at equal output quality. DLO sampled per-GPU peaks range from 19.13 to 22.97 GiB, compared with 36.01 to 132.56 GiB for resident configurations. Memory is a third measured tradeoff; no result here establishes fit or performance on another GPU model.
 
-A slow DLO DP2 warm request takes 791.530 seconds, and the corresponding server time window records 393.587 seconds of scheduler queue wait. DP4 logs also record roughly 404-second waits. The client submissions are close together, with nonzero recorded skew in some waves; this does not establish concurrent model execution. The reason the scheduler queued those requests remains unresolved. Queue-row association is temporal: the metric row does not carry the client correlation ID.
+A slow DLO DP2 warm request takes 791.530 seconds, and the corresponding server time window records 393.587 seconds of scheduler queue wait. DP4 logs also record roughly 404-second waits. The client submissions are close together, with nonzero recorded skew in some waves; this does not establish concurrent model execution. The reason the scheduler queued those requests remains unresolved. The queue-wait log entries are matched by time; they do not include the client request ID.
 
-All counted output bytes pass independent full decoding and expected video-format checks. Frame samples show the basic kitchen-robot scene across configurations, while pixels differ and semantic routing controls are incomplete. Output-quality equivalence remains unestablished.
+All measured videos pass independent full decoding and expected video-format checks. Sampled frames show the kitchen-robot scene, but pixels differ across configurations. Separate tests used different prompts to check whether each request produced the intended content; the sampled frames did not establish that for every prompt. Equal output quality remains unestablished.
 
-Reported memory is the maximum sampled per-device usage after each counted launch, including cold, warm and routing activity. Excluding mixed-attempt rows does not change the maxima. Sampling intervals vary and sometimes exceed four seconds.
+Reported memory is the maximum sampled per-device usage after the server launch used for each measurement, including cold, warm and distinct-prompt tests. Excluding samples from earlier attempts does not change the maxima. Sampling intervals vary and sometimes exceed four seconds.
 
-Historical execution includes multiple harness repairs/retries and a defective event ledger. The table was independently recomputed from primary launch, wave, validation and telemetry records. The original wave spans use UTC timestamps rather than monotonic boundaries.
+The benchmark required multiple harness repairs and retries. Wave times use UTC timestamps rather than monotonic boundaries; excluded attempts and the event-log defect are detailed below.
 
 ## 10.2 Launch and request settings
 
@@ -423,4 +425,4 @@ Requests send the retained [positive prompt](cosmos3_super_dlo_b200/example_t2v_
 
 The multipart fields are `size=1280x720`, `num_frames=189`, `fps=24`, `num_inference_steps=35`, `guidance_scale=6.0`, `max_sequence_length=4096`, `flow_shift=10.0`, `seed=17`, and `extra_params={"use_resolution_template":false,"use_duration_template":false,"guardrails":false}`. Outputs must return HTTP 200 and decode to 189 frames at 1280x720 and 24 fps. Cold waves are excluded from the table's throughput calculation.
 
-Launch records, request timings, wave validation, telemetry and decoded videos are retained and available on request. The measured wave spans are listed above so the reported means and throughput can be recomputed. Excluded attempts include a DP2 pass that sent the negative prompt as a positive prompt to one participant, failed barrier attempts and an aborted mixed DP/SP pass. These attempts are retained separately. The event ledger has 21 invalid entry hashes among 196 entries and is not used as measurement authority; the reported values were independently reconstructed from the primary records.
+Launch records, request timings, wave validation, telemetry and decoded videos are retained and available on request. The measured wave spans are listed above so the reported means and throughput can be recomputed. Excluded attempts include a DP2 pass that sent the negative prompt as a positive prompt to one participant, failed barrier attempts and an aborted mixed DP/SP pass. These attempts are retained separately. The benchmark event log has 21 invalid entry hashes among 196 entries. The table was independently recomputed from launch, request, validation and telemetry records instead of that log.
