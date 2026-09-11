@@ -1,6 +1,6 @@
 # Cosmos3-Super serving performance dashboard
 
-This document describes how to deploy and benchmark **nvidia/Cosmos3-Super** using vLLM-Omni. It covers service startup configuration, parallelism options, benchmark methodology, dataset settings, and performance results on 8x H200.
+This document describes how to deploy and benchmark **nvidia/Cosmos3-Super** using vLLM-Omni. It covers service startup configuration, parallelism options, benchmark methodology, dataset settings, and performance results on 8x H200 and 8x B200.
 
 ---
 
@@ -16,6 +16,7 @@ Contents:
 * Single request latency, a latency decomposition model, and a concurrency envelope
 * Reproducibility guidelines, including a determinism caveat that affects output comparison
 * B200 addendum: parallel-strategy pair, scaling ladder, concurrency spot-check, and batch-path results on 8x B200
+* DLO on B200 with v0.28.0: warm latency/throughput frontier, sampled memory and output-comparison limits
 
 ---
 
@@ -353,3 +354,73 @@ Within about 3-8% at 1 and 4 GPUs; 24% above the published 8-GPU number. Directi
 ### Artifacts
 
 Measurement logs, sweep JSONs, parity logs, sha256 manifests, and clips are retained and available on request; all numbers above are reproducible from them.
+
+---
+
+On B200, the pinned v0.26.0 DLO DP2 configuration returns `Cosmos3OmniDiffusersPipeline does not support request-batch forward.` The v0.26.0 rank-local SP4 configuration records `DiffusionWorker-2(exitcode=None)` and fails the request. SP4 with `--enforce-eager` completes at about 185 seconds per warm wave. On pinned v0.28.0, DP2 and SP4 each complete one cold and three warm waves: DP2 has 2 cold plus 6 warm outputs; SP4 has 1 cold plus 3 warm outputs. This establishes a release-level comparison; Torch, diffusers, Triton and other dependencies changed along with vLLM-Omni.
+
+Measured September 10, 2026 on 8x B200 SXM (183,359 MiB reported per GPU), driver 580.173.02. This section uses different images from sections 1-9 and compares the v0.28.0 configurations only with one another.
+
+| Software | Historical failure controls | Measured frontier |
+| --- | --- | --- |
+| vLLM / vLLM-Omni | 0.26.0 / 0.26.0 | 0.28.0 / 0.28.0 |
+| Torch | 2.11.0+cu130 | 2.13.0+cu130 |
+| Diffusers / Transformers | 0.38.0 / 5.14.1 | 0.40.0 / 5.14.1 |
+| Triton | 3.6.0 | 3.7.1 |
+
+Image pins:
+
+* v0.26.0: `vllm/vllm-omni@sha256:5cba1538c6f8ee81e8bea6708c24e68d7b2640f466a9fbf2ef15e68f2168b48b`
+* v0.28.0: `vllm/vllm-omni@sha256:6f8be103eaf0055448cf7578cfd621405fd669079d4361bd58896326b2bf722a` (amd64 manifest `sha256:4780186f168af96634917208596675439fa71cb5ed3440a30e8c21ca1defc451`)
+
+Cosmos3-Super, BF16, model snapshot `e0262be9d8f7586bc24c069a2aed2b665bdff266`; 1280x720, 189 frames, 24 fps, 35 steps, guidance 6.0, flow shift 10.0, seed 17, guardrails off. Direct `/v1/videos/sync` requests. Each measured configuration has one cold wave and three complete valid warm waves on its counted server launch. Wave span is the last response-body completion minus the first client submission. The retained wave boundaries use UTC timestamps; per-request durations use a monotonic clock. Videos/h/GPU is `3600 * valid warm outputs / (sum of warm spans * assigned GPUs)`. Three repeats support no percentile claims.
+
+## 10.1 Warm latency, throughput and memory
+
+![B200 latency and throughput by configuration; equal output quality is unestablished.](cosmos3_super_dlo_b200/pareto-plot.png)
+
+[Vector plot](cosmos3_super_dlo_b200/pareto-plot.svg)
+
+| Configuration | GPUs | Mean warm wave span (s) | Three warm spans (s) | Videos/h/GPU | Sampled peak GiB/GPU | Valid warm outputs |
+| --- | ---: | ---: | --- | ---: | ---: | ---: |
+| Resident single GPU | 1 | 381.8 | 381.77 / 381.73 / 381.76 | 9.43 | 132.56 | 3 |
+| Four resident single-GPU services | 4 | 388.4 | 388.34 / 388.50 / 388.40 | 9.27 | 132.56 | 12 |
+| Resident TP4 | 4 | 125.9 | 125.87 / 125.90 / 125.90 | 7.15 | 46.83 | 3 |
+| Resident CFG2 x Ulysses4 x HSDP8 | 8 | 74.9 | 74.83 / 74.99 / 74.93 | 6.01 | 36.01 | 3 |
+| DLO DP2 + AllGather | 2 | 531.0 | 400.49 / 400.84 / 791.53 | 6.78 | 21.10 | 6 |
+| DLO DP2 + SP2 + AllGather | 4 | 319.6 | 474.07 / 242.53 / 242.32 | 5.63 | 22.97 | 6 |
+| DLO DP4 + AllGather | 4 | 675.9 | 410.75 / 805.82 / 811.07 | 5.33 | 20.58 | 12 |
+| DLO SP4 rank-local | 4 | 183.0 | 182.77 / 182.78 / 183.35 | 4.92 | 19.13 | 3 |
+
+The measured latency/throughput frontier contains resident CFG2 x Ulysses4 x HSDP8, resident TP4 and resident single GPU. Every tested DLO point is dominated on those two measured axes. This does not establish a frontier at equal output quality. DLO sampled per-GPU peaks range from 19.13 to 22.97 GiB, compared with 36.01 to 132.56 GiB for resident configurations. Memory is a third measured tradeoff; no result here establishes fit or performance on another GPU model.
+
+A slow DLO DP2 warm request takes 791.530 seconds, and the corresponding server time window records 393.587 seconds of scheduler queue wait. DP4 logs also record roughly 404-second waits. The client submissions are close together, with nonzero recorded skew in some waves; this does not establish concurrent model execution. The reason the scheduler queued those requests remains unresolved. Queue-row association is temporal: the metric row does not carry the client correlation ID.
+
+All counted output bytes pass independent full decoding and expected video-format checks. Frame samples show the basic kitchen-robot scene across configurations, while pixels differ and semantic routing controls are incomplete. Output-quality equivalence remains unestablished.
+
+Reported memory is the maximum sampled per-device usage after each counted launch, including cold, warm and routing activity. Excluding mixed-attempt rows does not change the maxima. Sampling intervals vary and sometimes exceed four seconds.
+
+Historical execution includes multiple harness repairs/retries and a defective event ledger. The table was independently recomputed from primary launch, wave, validation and telemetry records. The original wave spans use UTC timestamps rather than monotonic boundaries.
+
+## 10.2 Launch and request settings
+
+All configurations use `vllm serve <local-model-snapshot> --omni --dtype bfloat16 --init-timeout 3600 --no-guardrails --vae-use-tiling --vae-patch-parallel-size 1`. The snapshot is pinned above. Each configuration starts on its assigned GPUs, with one server except for the four independent single-GPU services. DP means data parallelism, SP means sequence parallelism, and TP means tensor parallelism.
+
+| Configuration | Additional launch flags | Requests per wave |
+| --- | --- | --- |
+| Single GPU | None | 1 |
+| 4x single-GPU services | None | 4 |
+| Tensor-parallel 4 | `--tensor-parallel-size 4` | 1 |
+| CFG2 x Ulysses4 x HSDP8 | `--cfg-parallel-size 2 --ulysses-degree 4 --use-hsdp --hsdp-shard-size 8` | 1 |
+| DLO DP2+AllGather | `--enable-distributed-layerwise-offload --data-parallel-size 2 --dlo-use-allgather` | 2 |
+| DLO DP2+SP2+AllGather | `--enable-distributed-layerwise-offload --data-parallel-size 2 --dlo-use-allgather --usp 2` | 2 |
+| DLO DP4+AllGather | `--enable-distributed-layerwise-offload --data-parallel-size 4 --dlo-use-allgather` | 4 |
+| DLO SP4 rank-local | `--enable-distributed-layerwise-offload --usp 4 --dlo-no-use-allgather` | 1 |
+
+`VLLM_OMNI_VIDEO_SYNC_TIMEOUT`, `VLLM_OMNI_DLO_DP_WAVE_TIMEOUT` and `VLLM_OMNI_ASYNC_OUTPUT_TIMEOUT` are each 3600 seconds. Model loading uses the offline snapshot, with `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1` and `HF_HUB_DISABLE_XET=1`.
+
+Requests send the retained [positive prompt](cosmos3_super_dlo_b200/example_t2v_prompt.json) and [negative prompt](cosmos3_super_dlo_b200/negative_prompt.json) as JSON text in multipart form fields. Each participant in a measured wave uses the same prompt and seed. The four independent services receive one request each; other configurations receive the listed number of requests at one endpoint. The client releases participants through a shared barrier and waits for every response body before starting the next wave. Close submission times do not imply concurrent model execution.
+
+The multipart fields are `size=1280x720`, `num_frames=189`, `fps=24`, `num_inference_steps=35`, `guidance_scale=6.0`, `max_sequence_length=4096`, `flow_shift=10.0`, `seed=17`, and `extra_params={"use_resolution_template":false,"use_duration_template":false,"guardrails":false}`. Outputs must return HTTP 200 and decode to 189 frames at 1280x720 and 24 fps. Cold waves are excluded from the table's throughput calculation.
+
+Launch records, request timings, wave validation, telemetry and decoded videos are retained and available on request. The measured wave spans are listed above so the reported means and throughput can be recomputed. Excluded attempts include a DP2 pass that sent the negative prompt as a positive prompt to one participant, failed barrier attempts and an aborted mixed DP/SP pass. These attempts are retained separately. The event ledger has 21 invalid entry hashes among 196 entries and is not used as measurement authority; the reported values were independently reconstructed from the primary records.
